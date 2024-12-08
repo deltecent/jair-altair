@@ -1,24 +1,24 @@
 ;****************************************************************************
 ;
-;  CP/M cold boot loader for 8Mb Serial drive Altair CP/M
+;  CP/M cold boot loader for Altair CP/M using virtual Altair 8" floppy
+;    drives served through a JAIR serial port.
 ;
 ;    This code is loaded from sectors 0 and 2 into RAM by the disk boot
-;    loader PROM (DBL). This loader, in turn, loads the CP/M image into
-;    high RAM.
-;
-;    The loader is based on code from track buffered CP/M 2.2b v2.0.
+;    loader PROM. This loader, in turn, loads the CP/M image into RAM.
 ;
 ;    Version History
 ;
 ;    Ver     Date	  Description
 ;    ---   ---------	---------------------
-;    1.0   11/04/2017	Original, Mike Douglas 
-;    1.1   04/14/2020   Update for 8Mb serial drive (BIOSLEN equ) 
+;    1.0   10/28/23	Original, Mike Douglas
+;    1.1   11/26/23     Clear out any left over bytes coming from the
+;			server when an error has occurred.
+;    1.1J  12/06/24     Modified for JAIR SBC
 ;
 ;--------------------------------------------------------------------------
 ;
 ;    To patch changes made to this loader into a CP/M image saved from
-;    MOVCPM8 or MOVCPM5 (e.g., CPMxx.COM), use the following commands:
+;    MOVCPM2S (e.g., CPMxx.COM), use the following commands:
 ;
 ;	A>DDT CPMxx.COM
 ;	-IBOOT.HEX
@@ -28,347 +28,248 @@
 ;	A>SYSGEN
 ;
 ;****************************************************************************
+
 MEMSIZE	equ	56		;set memory size in K bytes
 
-;------------------------
-;  8" floppy equates
-;------------------------
-BIOSLEN	equ	1C00h		;length of BIOS for 8" floppy
-NUMTRK	equ	77		;number of tracks on the disk
-NUMSEC	equ	32		;sectors per track
-DATATRK	equ	6		;1st data format track
-SECMASK	equ	1Fh		;five bit sector numbers
-STRTSEC	equ	3		;starting sector of CP/M image on track 0
-SECCNT	equ	NUMSEC*2-STRTSEC   ;two CPM boot tracks less three sectors
+; 8" floppy equates
 
-;------------------------
+NUMSEC	equ	32		;sectors per track
+PSECLEN	equ	137		;physical sector length
+CSECLEN	equ	128		;CP/M sector length
+TRKLEN	equ	NUMSEC*PSECLEN
+SYSDATA	equ	3		;offset of 128 byte data payload in sector
+STRTSEC	equ	3		;starting sector of CP/M image on track 0
+
 ; CP/M size & locations
-;------------------------
+
 CCPLEN	equ	0800h		;CPM 2.2 fixed length
 BDOSLEN	equ	0E00h		;CPM 2.2 fixed length
+BIOSLEN	equ	1C00h		;length of BIOS for 8MB serial drive
 
 CCPBASE	equ	MEMSIZE*1024 - BIOSLEN - BDOSLEN - CCPLEN
 BIOSBAS	equ	(CCPBASE+CCPLEN+BDOSLEN) ;base address of this BIOS
 
-;------------------------
-; Common disk parameters
-;------------------------
-CSECLEN	equ	128		;CP/M sector length
-SSECLEN	equ	133		;Altair system sector length
+;-----------------------------
+; JAIR Serial Ports
+;-----------------------------
+COM1	equ	20h		;COM1 base port address
+COM1DAT	equ	COM1		;1st port on 2SIO board - data register
+COM1LCR	equ	COM1 + 3	;COM1 - line control register
+COM1MCR	equ	COM1 + 4	;COM1 - modem control register
+COM1LSR	equ	COM1 + 5	;COM1 - line status register
+COM1MSR	equ	COM1 + 6	;COM1 - modem status register
+COM1DLS	equ	COM1		;COM1 - divisor latch (LS)
+COM1DMS	equ	COM1 + 1	;COM1 - divisor latch (MS)
+COM2	equ	28h		;COM2 base port address
+COM2DAT	equ	COM2		;2nd port on 2SIO board - data register
+COM2LCR	equ	COM2 + 3	;COM2 - line control register
+COM2MCR	equ	COM2 + 4	;COM2 - modem control register
+COM2LSR	equ	COM2 + 5	;COM2 - line status register
+COM2MSR	equ	COM2 + 6	;COM2 - modem status register
+COM2DLS	equ	COM2		;COM2 - divisor latch (LS)
+COM2DMS	equ	COM2 + 1	;COM2 - divisor latch (MS)
+COMDLAB	equ	80h		;divisor latch access bit (DLAB)
+COMDR	equ	01h		;data ready (DR)
+COMTHRE	equ	20h		;transmit holding register empty (THRE)
+COMDTR	equ	01h		;data terminal ready (DTR)
+COMRTS	equ	02h		;request to send (RTS)
+COM8BIT	equ	03h		;8 bits
+COM96 	equ	12		;9.6K baud rate
+COM192	equ	6		;19.2K baud rate
+COM384	equ	3		;38.4K baud rate
+COM576	equ	2		;57.6K baud rate
+BAUD	equ	COM576		;set COM2 baud rate
 
-; System track sector format
-
-SYSTRK	equ	0		;offset of track number
-SYSDATA	equ	3		;offset of 128 byte data payload
-SYSSTOP	equ	131		;offset of stop byte (FFh)
-SYSCSUM	equ	132		;offset of checksum
-
-;------------------------
-; Altair disk controller 
-;------------------------
-DRVSLCT	equ	08h		;drive select register (out)
-cDSLCT	equ	80h		;deselect drive
-
-DRVSTAT	equ	08h		;drive status register (in)
-sENWD	equ	01h		;enter new write data flag
-sMOVEOK	equ	02h		;OK to move head
-sHDSTAT	equ	04h		;head status flag
-sDSKEN	equ	08h		;disk is selected and enabled
-sINTEN	equ	20h		;processor interrupts enabled
-sTRACK0	equ	40h		;on track zero flag
-sNRDA	equ	80h		;new read data available
-
-DRVCMD	equ	09h		;drive command register (out)
-cSTEPI	equ	01h		;step in
-cSTEPO	equ	02h		;step out
-cHDLOAD	equ	04h		;head load
-cRESTMR	equ	04h		;restart motor-off timer (MINIDSK)
-cHDUNLD	equ	08h		;head unload
-cINTEN	equ	10h		;interrupt enable
-cINTDIS	equ	20h		;interrupt disable
-cHCSON	equ	40h		;reduce head current switch
-cWRTEN	equ	80h		;write enable
-
-DRVSEC	equ	09h		;drive sector position (in)
-sNEWSEC	equ	01h		;new sector flag (sector true)
-
-DRVDATA	equ	0Ah		;drive read/write data (in/out)
-
-	
 ;--------------------------------------------------------------------------
 ;  Entry point
+;
+;  Serial ports are initialized by the PROM boot loader
 ;--------------------------------------------------------------------------
 	org	0
 
 start	di			;disable interrupts
 	lxi	sp,CCPBASE	;stack grows down from lowest CPM address
 
-; Deselect and reselect the drive in case this loader was loaded
-;    from somewhere other than drive 0
+; Load and move 1st track
 
-dSelLp	mvi	a,cDSLCT	;deselect a possibly attached drive
-	out	DRVSLCT	
+load	call	srb3ms		;discard received bytes until 3ms passes
+	jz	load		;   with no data received
 
-	mvi	a,0		;select drive 0
-	out	DRVSLCT
+	xra	a		;track 0
+	sta	trkNum
+	mvi	a,CSUMVAL AND 0FFh  ;re-init checksum
+	sta	chkSum
+	call	readTrk		;read the track
+	jnz	load		;error
 	
-	in	DRVSTAT		;see if select worked
-	ani	sDSKEN
-	jnz	dSelLp		;not selected, try again
+	lxi	h,trkBuf+(STRTSEC*PSECLEN)+SYSDATA   ;source pointer
+	lxi	d,CCPBASE	;DE->where to put CP/M
+	mvi	c,NUMSEC-3	;sector count to move
 
-	mvi	a,cHDLOAD	;load head 8"/restart timer for mini
-	out	DRVCMD
+secLp1	call	movSec		;move 128 bytes to run location
+	dcr	c		;decrement sector count		
+	jnz	secLp1
+
+; Load and move second track
+
+	lxi	h,trkNum	;move to track 1
+	inr	m
+	lxi	h,chkSum	;update checksum
+	inr	m
+	call	readTrk		;read second track
+	jnz	load		;error
 	
-; Restore to track zero
+	lxi	h,trkBuf+SYSDATA   ;source pointer
+	lxi	d,CCPBASE+CSECLEN*(NUMSEC-3)	;dest pointer
+	mvi	c,NUMSEC	;sector count to move
 
-seek0	in	DRVSTAT		;loop until OK to move the head 
-	ani	sMOVEOK
-	jnz	seek0
+secLp2	call	movSec		;move 128 bytes to run location
+	dcr	c		;decrement sector count		
+	jnz	secLp2
 
-	in	DRVSTAT		;see if we are at track 0
-	ani	sTRACK0		;at track zero?
-	jz	load		;yes, start the load process
+	jmp	BIOSBAS		;jump to BIOS cold start
 
-	mvi	a,cSTEPO	;issue step out
-	out	DRVCMD
-	jmp	seek0
-	
-; Load CP/M image
-
-load	lxi	b,SECCNT*256+STRTSEC    ;B=# secs to read, C=start sec
-	lxi	h,CCPBASE	;HL->CP/M load address
-	xra	a		;start on track 0
-	
-trkLoop	sta	trkNum		;save track number to use
-
-secLoop	shld	dmaAddr		;set read destination
-	mov	a,c		;set sector number from C
-	sta	secNum
-
-	push	b		;save sector count and number
-	call	read		;read next sector
-	pop	b
-	jnz	start		;failed read, start over
-	
-	dcr	b		;decrement total sector count
-	jz	BIOSBAS		;done, jump to BIOS cold start entry point
-	
-	inr	c		;bump to next sector number
-	mvi	a,NUMSEC	;A=number of sectors on a track
-	sub	c		;all 32 sectors on the track done?
-	jnz	secLoop		;no, read next sector
-	
-	mov	c,a		;start with C=sector 0 on text track
-	lda	trkNum		;increment track number
-	inr	a
-
-	jmp	trkLoop		;continue
-
-;----------------------------------------------------------------------------
-; read - Read one sector on the selected drive using trkNum, secNum,
-;    and dmaAddr previously specified.
+;--------------------------------------------------------------------------
+; movSec - Move 128 byte sector from trkBuf to RAM
 ;
 ; On Entry
-;    trkNum = track to read from
-;    secNum = sector number to read (0-31)
-;    dmaAddr = address of buffer to read into
+;    HL->data portion of sector in trkBuf
+;    DE->where to put sector
 ;
 ; On Exit
-;    sector read into (dmaAddr)
-;    HL = (dmaAddr) + CSECLEN
-;    Clobbers all
+;    HL and DE point to next sector
+; Clobbers B,D,E,H,L
 ;----------------------------------------------------------------------------
-read	call	readTrk		;fill track buffer if needed
+movSec	mvi	b,CSECLEN	;B=count of bytes to move
 
-	lxi	h,secNum	;HL->sector number
-	mov	d,m		;DE MSB=256*sector
-	inr	d		;account for trkBuf starting at 0100h
-	mvi	e,SYSDATA+1	;DE->data portion of secNum in trkBuf
-	
-	lhld	dmaAddr		;HL->destination for data
-	mvi	b,CSECLEN	;B=number of bytes to move
-	
-mrLoop	ldax	d		;move sector from trkBuf to (dmaAddr) 
-	mov	m,a
+msLoop	mov	a,m		;move sector from trkBuf to run location
+	stax	d
 	inx	h		;increment pointers
 	inx	d
 	dcr	b		;loop count
-	jnz	mrLoop 
-
-	ei
+	jnz	msLoop
+ 	
+	push	b		;increment source pointer
+	lxi	b,PSECLEN-CSECLEN
+	dad	b
+	pop	b
 	ret
 
 ;----------------------------------------------------------------------------
-; readTrk- read full track into track buffer if the requested 
-;    track (trkNum) does not match the buffered track (bfTrack).
-;    Unlike the BIOS version of readTrk, this code requires all
-;    sectors to read without error before exiting.
+; readTrk- read full track into track buffer
 ;
 ; On Entry
-;    trkNum = track to read (assumed each change is next track)
-;    bfTrack = track from which trkBuf was filled
+;    trkNum = track to read
 ;
 ; On Exit
-;    trkNum read into trkBuf
+;    track read into trkBuf
 ;    Clobbers all
 ;----------------------------------------------------------------------------
-readTrk	lda	trkNum		;A=requested track
-	lxi	h,bfTrack	;HL->buffered track number
-	cmp	m		;same track buffered?
-	rz			;yes, already have this track
+readTrk	lxi	h,readCmd	;send read command to server
+	mvi	b,CMDLEN	;B=count of bytes to send
+
+waitSnd	in	COM2LSR		;loop until OK to send
+	ani	COMTHRE
+	jz	waitSnd
+
+	mov	a,m		;A=byte to send
+	out	COM2DAT		;send it
+
+	inx	h		;point to next byte
+	dcr	b		;decrement byte count
+	jnz	waitSnd		;loop until command is sent
+
+	in	COM2DAT		;clear out any possible garbage bytes
+	in	COM2DAT
+
+	lxi	h,trkBuf	;receive track data into trkBuf
+	lxi	d,TRKLEN	;DE=length to read
+	lxi	b,0		;BC=checksum
+
+rtLoop	call	srByte		;get a byte
+	rnz			;timeout error
+	mov	m,a		;save byte in the buffer
+
+	add	c		;update checksum
+	mov	c,a
+	mvi	a,0
+	adc	b
+	mov	b,a
+
+	inx	h		;increment buffer pointer
+	dcx	d		;decrement byte counter
+	mov	a,d
+	ora	e
+	jnz	rtLoop		;loop until zero
+
+; Receive and compare 16 bit checksum
+
+	call	srByte		;get LSB of checksum
+	rnz			;timeout
+	cmp	c		;match?
+	rnz			;no
+		
+	call	srByte		;get MSB of checksum
+	rnz			;timeout
+	cmp	b		;match?
+	ret			;return with status
+
+;-------------------------------------------------------------------
+; srByte - Receive a byte from the server with 1 second timeout.
+;    Returns zero false for timeout, else true.
+;
+; srb3ms does the same thing but with a 3ms timeout
+;-------------------------------------------------------------------
+srb3ms	push	b		;popped later, so must push
+	lxi	b,125		;3ms timeout
+	jmp	srbLoop
+
+srByte	push	b		;preserve BC
+	lxi	b,41667		;1 second (48 cycles, 24us per loop)
 	
-	mov	m,a		;update buffered track number
-	jc	skpStep		;unknown track to track 0, skip step
+srbLoop	in	COM2LSR		;(10)
+	rrc			;(4)
+	jc	srbNew		;(10)
 
-	mvi	a,cSTEPI	;step in to next track (assume track
-	out	DRVCMD		;   change is always by +1)
-	
-skpStep	lxi	h,256*NUMSEC	;HL->flag byte in last sector of trkBuf
 
-initLp	mov	m,h		;set sector flag false (non-zero)
-	dcr	h		;decrement to preceding sector
-	jnz	initLp	
+	dcx	b		;(5)
+	mov	a,b		;(5)
+	ora	c		;(4)
+	jnz	srbLoop		;(10)
 
-	mvi	e,NUMSEC	;E=sectors remaining to fill
+	pop	b
+	inr	a		;zero false for timeout
+	ret
 
-rdLoop	call	dNxtSec		;wait for next sector, HL->sector buf
-	mov	a,m		;A=sector flag byte
-	ora	a		;this sector already read?
-	jz	rdLoop		;yes, skip it
+srbNew	pop	b		;restore BC
+	xra	a		;zero true
+	in	COM2DAT		;get and return the byte
+	ret
 
-	push	h		;save sector address
-	inx	h		;HL->1st read location in sector
-	call	dRead		;read the sector
-	pop	h		;restore sector address in HL
-	jnz	rdLoop		;read error
-
-	xra	a		;set sector flag to zero (good sector)
-	mov	m,a
-
-	dcr	e		;decrement sectors left to fill
-	jnz	rdLoop		;loop until all sectors good
-
+;-------------------------------------------------------------------
+; srvrClr - Pull and discard bytes received from server until no
+;    more bytes are received. A 3ms timeout between characters is
+;    used to detect end of data. This gives plenty off headroom
+;    down to 9600 baud.
+;-------------------------------------------------------------------
+srvrClr	push	b		;srbLoop pops B
+	lxi	b,125		;3ms timeout
+	call	srbLoop		;discard received bytes
+	jz	srvrClr		;  until timeout
 	ret
 
 ;---------------------------------------------------------------------------
-; dNxtSec - Wait for next (any) sector. Returns pointer to the sector
-;    buffer within trkBuf.
-;
-; On Entry
-;    Drive is selected, head loaded
-;
-; On Exit
-;    HL->sector buffer in trkBuf for sector found
-;    Clobbers A,H,L
-;---------------------------------------------------------------------------
-dNxtSec	in	DRVSEC		;read sector position register
-	rar			;wait for sector true (0=true)
-	jc	dNxtSec
-	
-	ani	SECMASK		;A=sector number found
-	mov	h,a		;HL MSB=256*sector
-	inr	h		;account for trkBuf starting at 0100h
-	mvi	l,0		;HL->sector in trkBuf
-	
-	ret
-
-;---------------------------------------------------------------------------
-; dRead - Read a sector, verify checksum, stop byte, and track number.
-;    Verification is done after the sector is read in the time between
-;    the last byte of the sector and before the start of the next sector.
-;    With index alignment and rotation speed tolerance accounted for,
-;    we safely have 360 cycles from the last byte of the sector until code
-;    should be in the sector true hunt loop.
-;
-; On Entry
-;    Drive is selected, sector true just detected
-;    HL->sector buffer
-;
-; On Exit
-;    Sector read to (HL)
-;    C = track number from disk with sync bit set
-;    Zero true if no error, Zero false for checksum error, missing 
-;        FF stop byte, or track number error 
-;    Clobbers A,B,C,H,L
-;---------------------------------------------------------------------------
-dRead	push	h		;(11) save pointer to start of sector
-	lxi	b,256+SSECLEN	;(10) B=chksum (-FF), C=bytes to read
-
-; The sector transfer loop is 116 cycles for two bytes read (has to be
-;     less than 128) and computes checksum over all bytes read. For the
-;     mini disk, only one byte is read per loop iteration.
-
-drSecWt	in	DRVSTAT		;(10) get drive status byte
-	ora	a		;(4) wait for NRDA flag true (zero)
-	jm	drSecWt		;(10) 
-
- 	in	DRVDATA		;(10) read first byte at 24-48 cycles
-	mov	m,a		;(7) store in buffer
-	add	b		;(4) update checksum
-	mov	b,a		;(5) keep checksum in B
-	inx	h		;(5) increment buffer pointer
-	dcr	c		;(5) decrement byte count
-	jz	drSecDn		;(10) exit if done
-
-	in	DRVDATA		;(10) read at 70-94 cycles (data at 64 and 128)
-	mov	m,a		;(7) store in buffer
-	add	b		;(4) update checksum
-	mov	b,a		;(5) keep checksum in B
-	inx	h		;(5) increment buffer pointer
-	dcr	c		;(5) decrement byte count
-	jnz	drSecWt		;(10) repeat until done 
-
-; drSecDn - Validate the sector
-
-drSecDn	dcx	h		;(5) HL->checksum in sector
-	sub	m		;(7) subtract from computed checksum
-	sub	m		;(7) final sum will be zero
-
-	dcx	h		;(5) HL->stop byte
-	mov	b,m		;(7) B=stop byte
-	pop	h		;(10) restore HL->start of buffer
-	inr	b		;(4) was FF stop byte there?
-	rnz			;(5/11) no, return error
-
-	mov	c,m		;(7) C=track number from disk
-	sub	c		;(4) take track out of checksum
-
-	inx	h		;(5) HL->2nd byte of sector
-	sub	m		;(7) take out of checksum
-	
-	inx	h		;(5) HL->3rd byte of sector
-	sub	m		;(7) sum should be zero here
-	rnz			;(5/11) exit with error
-	
-	lda	trkNum		;(10) A=track we should be on
-	ori	80h		;(7) set sync bit
-	cmp	c		;(4) same track as from sector?
-	ret			;(11) exit with compare status
-
-;-------------------------------------------------------------------------
 ; Data Area
-;-------------------------------------------------------------------------
-bfTrack	db	0FFh		;currently buffered track (none)
-trkNum	ds	1		;track number from CP/M call
-secNum	ds	1		;sector number from CP/M call
-dmaAddr	ds	2		;dma address for disk operations from CP/M
+;---------------------------------------------------------------------------
+CSUMVAL	equ	'R'+'E'+'A'+'D'+(TRKLEN/256)+(TRKLEN AND 0FFh)
 
-; Track buffer - Located at 0100h and 256 bytes allocated per sector
-;    to reduce code space and increase sector lookup speed
+readCmd	db	'READ'		;read command to server
+trkNum	db	0		;track number to read
+drvNum	db	0
+readLen	dw	TRKLEN
+chkSum	dw	CSUMVAL
+CMDLEN	equ	$-readCmd
 
-trkBuf	equ	0100h		;track buffer fixed at 0100h.
+trkBuf	equ	$		;track buffer
 
 	end
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -1,7 +1,7 @@
 ;****************************************************************************
 ;
 ; PROM boot loader for Altair CP/M using virtual Altair 8" floppy drives
-;    served through an 88-2SIO serial port.
+;    served through JAIR COM2 serial port.
 ;
 ;    This code loads sectors 0 and 2 of track 0, which contains the CP/M
 ;    loader, into RAM at address zero and then jumps to it.
@@ -13,6 +13,7 @@
 ;    1.0   10/28/23	Original, Mike Douglas
 ;    1.1   11/26/23	Clear out possible left over bytes from UART before
 ;			starting a read operation from the disk server.
+;    1.1J  05/27/24     Modified for JAIR
 ;
 ;****************************************************************************
 
@@ -26,12 +27,36 @@ CSECLEN	equ	128		;CP/M sector length
 TRKLEN	equ	NUMSEC*PSECLEN
 SYSDATA	equ	3		;offset of 128 byte data payload in sector
 
-; Server serial port is port B on 88-2SIO
-
-SRVRCTL	equ	12h		;control/status port
-SRVRDAT	equ	13h		;data port
-SIORDRF	equ	01h		;receive data ready
-SIOTDRE	equ	02h		;tranmsit data register empty
+;-----------------------------
+; JAIR Serial Ports
+;-----------------------------
+COM1	equ	20h		;COM1 base port address
+COM1DAT	equ	COM1		;1st port on JAIR board - data register
+COM1LCR	equ	COM1 + 3	;COM1 - line control register
+COM1MCR	equ	COM1 + 4	;COM1 - modem control register
+COM1LSR	equ	COM1 + 5	;COM1 - line status register
+COM1MSR	equ	COM1 + 6	;COM1 - modem status register
+COM1DLS	equ	COM1		;COM1 - divisor latch (LS)
+COM1DMS	equ	COM1 + 1	;COM1 - divisor latch (MS)
+COM2	equ	28h		;COM2 base port address
+COM2DAT	equ	COM2		;2nd port on JAIR board - data register
+COM2LCR	equ	COM2 + 3	;COM2 - line control register
+COM2MCR	equ	COM2 + 4	;COM2 - modem control register
+COM2LSR	equ	COM2 + 5	;COM2 - line status register
+COM2MSR	equ	COM2 + 6	;COM2 - modem status register
+COM2DLS	equ	COM2		;COM2 - divisor latch (LS)
+COM2DMS	equ	COM2 + 1	;COM2 - divisor latch (MS)
+COMDLAB	equ	80h		;divisor latch access bit (DLAB)
+COMDR	equ	01h		;data ready (DR)
+COMTHRE	equ	20h		;transmit holding register empty (THRE)
+COMDTR	equ	01h		;data terminal ready (DTR)
+COMRTS	equ	02h		;request to send (RTS)
+COM8BIT	equ	03h		;8 bits
+COM96 	equ	12		;9.6K baud rate
+COM192	equ	6		;19.2K baud rate
+COM384	equ	3		;38.4K baud rate
+COM576	equ	2		;57.6K baud rate
+BAUD	equ	COM384		;set COM2 baud rate
 
 ;--------------------------------------------------------------------------
 ;  Entry point
@@ -40,10 +65,22 @@ SIOTDRE	equ	02h		;tranmsit data register empty
 
 start	di			;disable interrupts
 	lxi	sp,STACK	;init stack pointer
-	mvi	a,03h		;reset the server serial port
-	out	SRVRCTL
-	mvi	a,15h		;8N1
-	out	SRVRCTL
+
+	mvi	a,COMDLAB
+	out	COM1LCR
+	out	COM2LCR
+
+	mvi	a,COM96		;set COM1 to 9.6K baud rate
+	out	COM1DLS
+	mvi	a,BAUD		;set COM2 to baud rate
+	out	COM2DLS
+	mvi	a,0
+	out	COM1DMS
+	out	COM2DMS
+
+	mvi	a,COM8BIT	;8N1
+	out	COM1LCR
+	out	COM2LCR
 
 ; Load sector 0 and 2 of track 0 into RAM starting at address zero
 
@@ -70,7 +107,7 @@ load	call	srb3ms		;discard received bytes until 3ms passes
 ;    DE->where to put sector
 ;
 ; On Exit
-;    HL and DE point to next sector 
+;    HL and DE point to next sector
 ; Clobbers B,D,E,H,L
 ;----------------------------------------------------------------------------
 movSec	mvi	b,CSECLEN	;B=count of bytes to move
@@ -97,12 +134,12 @@ msLoop	mov	a,m		;move sector from TRKBUF to run location
 readTrk	lxi	h,readCmd	;send read command to server
 	mvi	b,CMDLEN	;B=count of bytes to send
 
-waitSnd	in	SRVRCTL		;loop until OK to send
-	ani	SIOTDRE	
+waitSnd	in	COM2LSR		;loop until OK to send
+	ani	COMTHRE
 	jz	waitSnd
 
 	mov	a,m		;A=byte to send
-	out	SRVRDAT		;send it
+	out	COM2DAT		;send it
 
 	inx	h		;point to next byte
 	dcr	b		;decrement byte count
@@ -153,7 +190,7 @@ srb3ms	push	b		;popped later, so must push
 srByte	push	b		;preserve BC
 	lxi	b,41667		;1 second (48 cycles, 24us per loop)
 	
-srbLoop	in	SRVRCTL		;(10)
+srbLoop	in	COM2LSR		;(10)
 	rrc			;(4)
 	jc	srbNew		;(10)
 
@@ -168,7 +205,7 @@ srbLoop	in	SRVRCTL		;(10)
 
 srbNew	pop	b		;restore BC
 	xra	a		;zero true
-	in	SRVRDAT		;get and return the byte
+	in	COM2DAT		;get and return the byte
 	ret
 
 ;---------------------------------------------------------------------------
