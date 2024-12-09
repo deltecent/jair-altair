@@ -1,5 +1,7 @@
 # jair-altair
-Serial Virtual Drive CP/M 2.2b for JAIR SBC
+Serial Virtual Drive CP/M 2.2b for JAIR SBC.
+
+Use the same 8MB Serial and 330K Altair 8" disk images used with the FDC+ and Serial Drive Server. The Serial Drive Server works over the JAIR's second serial port.
 
 # Booting
 Put `ALTBOOT.HEX` on your SD card.
